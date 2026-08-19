@@ -1,0 +1,530 @@
+import os
+import re
+import socket
+import ipaddress
+from urllib.parse import urlparse
+
+import aiohttp
+import discord
+from discord import app_commands
+
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+if not TOKEN:
+    raise RuntimeError("Le token Discord est absent.")
+
+
+intents = discord.Intents.default()
+
+
+class OSINTBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        await self.tree.sync()
+
+    async def on_ready(self):
+        print(f"✅ Connecté en tant que {self.user}")
+        print(f"🆔 ID : {self.user.id}")
+
+
+bot = OSINTBot()
+
+
+# =========================================================
+# /email
+# =========================================================
+
+@bot.tree.command(
+    name="email",
+    description="Analyse publiquement une adresse e-mail"
+)
+@app_commands.describe(email="Adresse e-mail à analyser")
+async def email(interaction: discord.Interaction, email: str):
+
+    email = email.strip().lower()
+
+    pattern = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+    if not re.match(pattern, email):
+        await interaction.response.send_message(
+            "❌ Cette adresse e-mail semble invalide."
+        )
+        return
+
+    domain = email.split("@")[1]
+
+    try:
+        mx_records = socket.getaddrinfo(
+            domain,
+            25,
+            type=socket.SOCK_STREAM
+        )
+
+        mx_status = "🟢 Domaine joignable"
+
+    except socket.gaierror:
+        mx_status = "🔴 Domaine introuvable"
+
+    embed = discord.Embed(
+        title="📧 Analyse e-mail",
+        color=discord.Color.blue()
+    )
+
+    embed.add_field(
+        name="Adresse",
+        value=f"`{email}`",
+        inline=False
+    )
+
+    embed.add_field(
+        name="Domaine",
+        value=f"`{domain}`",
+        inline=True
+    )
+
+    embed.add_field(
+        name="Format",
+        value="🟢 Valide",
+        inline=True
+    )
+
+    embed.add_field(
+        name="Domaine",
+        value=mx_status,
+        inline=True
+    )
+
+    embed.set_footer(
+        text="OSINT public • aucune donnée privée récupérée"
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
+# =========================================================
+# /username
+# =========================================================
+
+@bot.tree.command(
+    name="username",
+    description="Recherche un pseudo sur des plateformes publiques"
+)
+@app_commands.describe(username="Pseudo à rechercher")
+async def username(interaction: discord.Interaction, username: str):
+
+    username = username.strip()
+
+    if not re.match(r"^[a-zA-Z0-9_.-]{2,32}$", username):
+        await interaction.response.send_message(
+            "❌ Pseudo invalide."
+        )
+        return
+
+    await interaction.response.defer()
+
+    sites = {
+        "GitHub": f"https://github.com/{username}",
+        "Reddit": f"https://www.reddit.com/user/{username}",
+        "Twitch": f"https://www.twitch.tv/{username}",
+        "YouTube": f"https://www.youtube.com/@{username}",
+    }
+
+    results = []
+
+    timeout = aiohttp.ClientTimeout(total=8)
+
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        headers={"User-Agent": "Public-OSINT-Bot/1.0"}
+    ) as session:
+
+        for name, url in sites.items():
+
+            try:
+                async with session.get(
+                    url,
+                    allow_redirects=True
+                ) as response:
+
+                    if response.status == 200:
+                        results.append(
+                            f"🟢 **{name}** — trouvé\n{url}"
+                        )
+                    elif response.status == 404:
+                        results.append(
+                            f"🔴 **{name}** — non trouvé"
+                        )
+                    else:
+                        results.append(
+                            f"🟡 **{name}** — statut {response.status}"
+                        )
+
+            except Exception:
+                results.append(
+                    f"⚪ **{name}** — impossible à vérifier"
+                )
+
+    embed = discord.Embed(
+        title=f"👤 Recherche : {username}",
+        description="\n\n".join(results),
+        color=discord.Color.green()
+    )
+
+    embed.set_footer(
+        text="Recherche limitée aux profils publics"
+    )
+
+    await interaction.followup.send(embed=embed)
+
+
+# =========================================================
+# /ip
+# =========================================================
+
+@bot.tree.command(
+    name="ip",
+    description="Analyse les informations publiques d'une adresse IP"
+)
+@app_commands.describe(ip="Adresse IPv4 ou IPv6")
+async def ip_lookup(
+    interaction: discord.Interaction,
+    ip: str
+):
+
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Adresse IP invalide."
+        )
+        return
+
+    if ip_obj.is_private or ip_obj.is_loopback:
+        await interaction.response.send_message(
+            "⚠️ Cette IP est privée ou locale."
+        )
+        return
+
+    await interaction.response.defer()
+
+    url = f"https://ipapi.co/{ip}/json/"
+
+    try:
+
+        timeout = aiohttp.ClientTimeout(total=8)
+
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
+
+            async with session.get(url) as response:
+
+                if response.status != 200:
+                    raise Exception("API indisponible")
+
+                data = await response.json()
+
+        embed = discord.Embed(
+            title=f"🌍 Analyse IP : {ip}",
+            color=discord.Color.orange()
+        )
+
+        embed.add_field(
+            name="Pays",
+            value=data.get("country_name", "Inconnu"),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Région",
+            value=data.get("region", "Inconnue"),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Ville",
+            value=data.get("city", "Inconnue"),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Organisation",
+            value=data.get("org", "Inconnue"),
+            inline=False
+        )
+
+        embed.add_field(
+            name="ASN",
+            value=data.get("asn", "Inconnu"),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Timezone",
+            value=data.get("timezone", "Inconnue"),
+            inline=True
+        )
+
+        embed.set_footer(
+            text="Géolocalisation approximative d'une IP publique"
+        )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception:
+        await interaction.followup.send(
+            "❌ Impossible d'obtenir les informations publiques de cette IP."
+        )
+
+
+# =========================================================
+# /domain
+# =========================================================
+
+@bot.tree.command(
+    name="domain",
+    description="Analyse publiquement un nom de domaine"
+)
+@app_commands.describe(domain="Nom de domaine")
+async def domain_lookup(
+    interaction: discord.Interaction,
+    domain: str
+):
+
+    domain = domain.strip().lower()
+
+    domain = domain.replace(
+        "https://", ""
+    ).replace(
+        "http://", ""
+    ).split("/")[0]
+
+    if not re.match(
+        r"^(?=.{1,253}$)([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$",
+        domain
+    ):
+        await interaction.response.send_message(
+            "❌ Nom de domaine invalide."
+        )
+        return
+
+    await interaction.response.defer()
+
+    try:
+
+        addresses = socket.getaddrinfo(
+            domain,
+            443,
+            type=socket.SOCK_STREAM
+        )
+
+        ips = sorted(
+            set(
+                result[4][0]
+                for result in addresses
+            )
+        )
+
+        ip_text = "\n".join(
+            f"`{ip}`" for ip in ips[:10]
+        )
+
+        embed = discord.Embed(
+            title=f"🌐 Analyse : {domain}",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="Domaine",
+            value=f"`{domain}`",
+            inline=False
+        )
+
+        embed.add_field(
+            name="Adresse(s) IP",
+            value=ip_text or "Aucune",
+            inline=False
+        )
+
+        embed.add_field(
+            name="HTTPS",
+            value="🔒 Vérifié comme cible HTTPS",
+            inline=True
+        )
+
+        embed.set_footer(
+            text="Informations DNS publiques"
+        )
+
+        await interaction.followup.send(embed=embed)
+
+    except socket.gaierror:
+
+        await interaction.followup.send(
+            "❌ Impossible de résoudre ce domaine."
+        )
+
+
+# =========================================================
+# /url
+# =========================================================
+
+@bot.tree.command(
+    name="url",
+    description="Analyse une URL publique"
+)
+@app_commands.describe(url="URL à analyser")
+async def url_lookup(
+    interaction: discord.Interaction,
+    url: str
+):
+
+    url = url.strip()
+
+    if not url.startswith(
+        ("http://", "https://")
+    ):
+        url = "https://" + url
+
+    parsed = urlparse(url)
+
+    if not parsed.hostname:
+        await interaction.response.send_message(
+            "❌ URL invalide."
+        )
+        return
+
+    await interaction.response.defer()
+
+    try:
+
+        timeout = aiohttp.ClientTimeout(total=10)
+
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers={
+                "User-Agent": "Public-OSINT-Bot/1.0"
+            }
+        ) as session:
+
+            async with session.get(
+                url,
+                allow_redirects=True
+            ) as response:
+
+                final_url = str(response.url)
+
+                embed = discord.Embed(
+                    title="🔗 Analyse URL",
+                    color=discord.Color.purple()
+                )
+
+                embed.add_field(
+                    name="URL",
+                    value=f"`{url}`",
+                    inline=False
+                )
+
+                embed.add_field(
+                    name="Statut HTTP",
+                    value=f"`{response.status}`",
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="Domaine",
+                    value=f"`{parsed.hostname}`",
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="HTTPS",
+                    value=(
+                        "🟢 Oui"
+                        if parsed.scheme == "https"
+                        else "🔴 Non"
+                    ),
+                    inline=True
+                )
+
+                if final_url != url:
+                    embed.add_field(
+                        name="Redirection finale",
+                        value=f"`{final_url}`",
+                        inline=False
+                    )
+
+                embed.set_footer(
+                    text="Analyse technique publique • aucune donnée privée"
+                )
+
+                await interaction.followup.send(
+                    embed=embed
+                )
+
+    except Exception:
+
+        await interaction.followup.send(
+            "❌ Impossible d'accéder à cette URL."
+        )
+
+
+# =========================================================
+# /help
+# =========================================================
+
+@bot.tree.command(
+    name="help",
+    description="Affiche les commandes du bot"
+)
+async def help_command(
+    interaction: discord.Interaction
+):
+
+    embed = discord.Embed(
+        title="🔎 OSINT Bot",
+        description="Outils d'analyse de sources publiques",
+        color=discord.Color.blurple()
+    )
+
+    embed.add_field(
+        name="📧 /email",
+        value="Analyse le format et le domaine d'un e-mail.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="👤 /username",
+        value="Recherche un pseudo sur des plateformes publiques.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🌍 /ip",
+        value="Informations générales sur une IP publique.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🌐 /domain",
+        value="Résolution et informations DNS basiques.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔗 /url",
+        value="Analyse technique d'une URL publique.",
+        inline=False
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+bot.run(TOKEN)
